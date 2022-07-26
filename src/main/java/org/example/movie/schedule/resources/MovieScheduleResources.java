@@ -8,7 +8,7 @@ import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import lombok.AllArgsConstructor;
-import org.example.movie.schedule.dto.mq.MovieInventoryRequest;
+import org.example.movie.core.common.schedule.MovieInventoryRequest;
 import org.example.movie.schedule.dto.response.Movie;
 import org.example.movie.schedule.service.MovieSchedulerService;
 import org.springframework.format.annotation.DateTimeFormat;
@@ -24,6 +24,8 @@ import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeoutException;
 
 @CrossOrigin
 @RestController
@@ -58,7 +60,7 @@ public class MovieScheduleResources {
       @PathVariable(name = "cityId") String cityId,
       @DateTimeFormat(pattern = "yyyy-MM-dd") @RequestParam(name = "scheduleDate", required = false)
           LocalDate scheduleDate)
-      throws JsonProcessingException {
+          throws JsonProcessingException, ExecutionException, InterruptedException, TimeoutException {
     DateTimeFormatter formatters = DateTimeFormatter.ofPattern("yyyy-MM-dd");
     String dateAsString =
         Optional.ofNullable(scheduleDate).orElseGet(LocalDate::now).format(formatters);

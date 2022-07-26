@@ -4,26 +4,28 @@ import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
-import org.example.movie.schedule.configuration.ExchangeConfiguration;
-import org.example.movie.schedule.dto.mq.MovieDetailsResponse;
-import org.example.movie.schedule.dto.mq.MovieInventoryRequest;
-import org.example.movie.schedule.dto.mq.MovieInventoryResponse;
-import org.example.movie.schedule.dto.mq.MovieScheduleRequest;
-import org.example.movie.schedule.dto.mq.MovieScheduleResponse;
-import org.example.movie.schedule.dto.mq.TheatreDetailsResponse;
+import org.example.movie.core.common.schedule.MovieDetailsResponse;
+import org.example.movie.core.common.schedule.MovieInventoryRequest;
+import org.example.movie.core.common.schedule.MovieInventoryResponse;
+import org.example.movie.core.common.schedule.MovieScheduleRequest;
+import org.example.movie.core.common.schedule.MovieScheduleResponse;
+import org.example.movie.core.common.schedule.MovieScheduleTheatre;
+import org.example.movie.schedule.adapter.KafkaProducerAdapter;
 import org.example.movie.schedule.dto.response.Movie;
 import org.example.movie.schedule.dto.response.MovieDetails;
 import org.example.movie.schedule.dto.response.ShowSchedule;
+import org.example.movie.schedule.dto.response.ShowTime;
 import org.example.movie.schedule.dto.response.Theatre;
-import org.springframework.amqp.rabbit.connection.CorrelationData;
-import org.springframework.amqp.rabbit.core.RabbitTemplate;
-import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
 
 import static java.util.Optional.ofNullable;
@@ -34,93 +36,84 @@ import static java.util.Optional.ofNullable;
 @Service
 public class MovieSchedulerService {
 
-  private final RabbitTemplate rabbitTemplate;
-  private final ExchangeConfiguration movieInventoryExchange;
-  private final ExchangeConfiguration movieScheduleExchange;
+  private final KafkaProducerAdapter kafkaProducerAdapter;
 
-  public List<Movie> getMovieSchedule(final MovieInventoryRequest movieInventoryRequest) {
-    CorrelationData correlationData = new CorrelationData(UUID.randomUUID().toString());
-    return ofNullable(
-            ofNullable(sendMovieInventoryMessageToExchange(movieInventoryRequest, correlationData))
-                .orElseGet(MovieInventoryResponse::new)
-                .getMovieDetailsResponseList())
-        .orElseGet(ArrayList::new)
-        .stream()
-        .map(
-            movieDetailsResponse ->
-                Movie.of()
-                    .setMovieDetails(convertToMovieDetails(movieDetailsResponse))
-                    .setShowSchedule(
-                        getShowSchedule(
-                            movieDetailsResponse.getMovieCityIdMapping(),
-                            movieInventoryRequest.getScheduleDate(),
-                            correlationData)))
-        .collect(Collectors.toUnmodifiableList());
+  public List<Movie> getMovieSchedule(final MovieInventoryRequest movieInventoryRequest)
+          throws ExecutionException, InterruptedException, TimeoutException {
+    String correlationData = UUID.randomUUID().toString();
+    log.info("Starting Transaction with : {}",correlationData);
+    MovieInventoryResponse movieInventoryResponse = ofNullable(kafkaProducerAdapter
+            .kafkaMovieInventoryRequestReplyObject(correlationData,movieInventoryRequest))
+                    .orElseGet(MovieInventoryResponse::of);
+    List<MovieDetailsResponse> movieDetailsResponseList =
+            ofNullable(movieInventoryResponse
+                    .getMovieDetailsResponseList())
+            .orElseGet(ArrayList::new);
+    Map<String, List<MovieScheduleTheatre>> showScheduleMap=
+            getShowScheduleMap(correlationData,
+            movieInventoryRequest.getScheduleDate(),
+                    movieDetailsResponseList.stream()
+                    .map(MovieDetailsResponse::getMovieCityIdMapping)
+                    .collect(Collectors.toList()));
+    return movieDetailsResponseList
+            .stream()
+            .map(movieDetailsResponse ->
+                    Movie
+                            .of()
+                            .setMovieDetails(convertToMovieDetails(movieDetailsResponse))
+                            .setShowSchedule(
+                                    ShowSchedule
+                                            .of()
+                                            .setShowDate(movieInventoryRequest.getScheduleDate())
+                                            .setTheatreList(
+                                                    showScheduleMap.get(movieDetailsResponse.getMovieCityIdMapping())
+                                                            .stream()
+                                                            .map(this::getTheatreShowTimeFromTheatreDetailsResponse)
+                                                            .collect(Collectors.toList())
+                                            )
+                            )
+            ).collect(Collectors.toList());
   }
 
-  private ShowSchedule getShowSchedule(
-      String movieCityMapping, String scheduleDate, CorrelationData correlationData) {
-    return ShowSchedule.of()
-        .setShowDate(scheduleDate)
-        .setTheatreList(
-            ofNullable(
-                    sendMovieScheduleMessageToExchange(
-                            MovieScheduleRequest.of()
-                                .setScheduleDate(scheduleDate)
-                                .setMovieCityMappingId(movieCityMapping),
-                            correlationData)
-                        .getTheatreDetailsResponseList())
-                .orElseGet(ArrayList::new)
-                .stream()
-                .map(this::getTheatreShowTimeFromTheatreDetailsResponse)
-                .collect(Collectors.toList()));
+
+  private Map<String, List<MovieScheduleTheatre>> getShowScheduleMap(String correlationData,
+                                                                     String scheduleDate,
+                                                                     List<String> movieCityMappingList)
+          throws ExecutionException, InterruptedException, TimeoutException {
+    return ofNullable(ofNullable(kafkaProducerAdapter.kafkaMovieScheduleRequestReplyObject(
+            correlationData,
+            MovieScheduleRequest.of()
+                    .setScheduleDate(scheduleDate)
+                    .setMovieCityMappingIdList(movieCityMappingList)))
+            .orElseGet(MovieScheduleResponse::of)
+            .getMovieScheduleMap())
+            .orElseGet(HashMap::new);
   }
 
   private Theatre getTheatreShowTimeFromTheatreDetailsResponse(
-      TheatreDetailsResponse theatreDetailsResponse) {
+          MovieScheduleTheatre movieScheduleTheatre) {
     return Theatre.of()
-        .setTheatreName(theatreDetailsResponse.getTheatreName())
-        .setShowTime(theatreDetailsResponse.getShowtime());
+            .setTheatreName(movieScheduleTheatre.getTheatreDetails().getTheatreName())
+            .setShowTimeList(movieScheduleTheatre
+                    .getMovieShowList()
+                    .stream()
+                    .map(movieShow ->
+                            ShowTime
+                                    .of()
+                                    .setShowtime(movieShow.getShowtime())
+                                    .setSeatCount(movieShow.getSeatCount()))
+                    .collect(Collectors.toList())
+            );
   }
 
   private MovieDetails convertToMovieDetails(MovieDetailsResponse movieDetailsResponse) {
     return MovieDetails.of()
-        .setMovieName(movieDetailsResponse.getMovieName())
-        .setGenre(
-            Arrays.asList(StringUtils.trimToEmpty(movieDetailsResponse.getGenre()).split(",")))
-        .setCertification(movieDetailsResponse.getMovieCertificationType())
-        .setLanguage(movieDetailsResponse.getLanguage())
-        .setRunTime(movieDetailsResponse.getMovieRunTime())
-        .setReleaseDate(movieDetailsResponse.getMovieReleaseDate());
-  }
-
-  private MovieInventoryResponse sendMovieInventoryMessageToExchange(
-      MovieInventoryRequest message, CorrelationData correlationData) {
-    return rabbitTemplate.convertSendAndReceiveAsType(
-        movieInventoryExchange.getExchange(),
-        movieInventoryExchange.getRoutingKey(),
-        message,
-        messageProperties -> {
-          messageProperties.getMessageProperties().setContentType("application/json");
-          messageProperties.getMessageProperties().setReplyTo("movieInventoryQueue");
-          return messageProperties;
-        },
-        correlationData,
-        ParameterizedTypeReference.forType(MovieInventoryResponse.class));
-  }
-
-  private MovieScheduleResponse sendMovieScheduleMessageToExchange(
-      MovieScheduleRequest message, CorrelationData correlationData) {
-    return rabbitTemplate.convertSendAndReceiveAsType(
-        movieScheduleExchange.getExchange(),
-        movieScheduleExchange.getRoutingKey(),
-        message,
-        messageProperties -> {
-          messageProperties.getMessageProperties().setContentType("application/json");
-          messageProperties.getMessageProperties().setReplyTo("movieScheduleQueue");
-          return messageProperties;
-        },
-        correlationData,
-        ParameterizedTypeReference.forType(MovieScheduleResponse.class));
+            .setMovieName(movieDetailsResponse.getMovieName())
+            .setGenre(
+                    Arrays.asList(StringUtils.trimToEmpty(movieDetailsResponse.getGenre()).split(",")))
+            .setCertification(movieDetailsResponse.getMovieCertificationType())
+            .setLanguage(movieDetailsResponse.getLanguage())
+            .setRunTime(movieDetailsResponse.getMovieRunTime())
+            .setReleaseDate(movieDetailsResponse.getMovieReleaseDate());
   }
 }

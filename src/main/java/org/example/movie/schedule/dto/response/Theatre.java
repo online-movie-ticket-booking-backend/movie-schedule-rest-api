@@ -9,5 +9,5 @@ import java.util.List;
 @Accessors(chain = true)
 public class Theatre {
   private String theatreName;
-  private List<String> showTime;
+  private List<ShowTime> showTimeList;
 }

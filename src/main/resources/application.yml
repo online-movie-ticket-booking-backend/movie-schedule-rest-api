@@ -1,13 +1,8 @@
 spring:
-  rabbitmq:
-    listener:
-      simple:
-        retry:
-          enabled: true
-          initial-interval: 1s
-          max-attempts: 5
-          max-interval: 5s
-          multiplier: 2
+  kafka:
+    bootstrap-servers: localhost:20010
+    admin:
+      client-id: movie-schedule-rest-api
 
 
 server:
@@ -25,16 +20,17 @@ logging:
     org.hibernate: INFO
     org.example.movie.schedule: INFO
     org.springframework.web: TRACE
-message:
-  messageConfiguration:
-    host: localhost
-    port: 20004
-    username: guest
-    password: guest
-    virtualHost: snk-rmq
-  movieInventoryExchangeConfiguration:
-    exchange: movieScheduleExchange
-    routingKey: movie.inventory
-  movieScheduleExchangeConfiguration:
-    exchange: movieScheduleExchange
-    routingKey: movie.schedule
+
+kafka:
+  movieBookingApi:
+    groupName: movie-schedule
+    movieInventory:
+      topic:
+        request: movie-inventory-request
+        response: movie-inventory-response
+        serialization-class: org.example.movie.core.common.schedule.MovieInventoryResponse
+    movieSchedule:
+      topic:
+        request: movie-schedule-request
+        response: movie-schedule-response
+        serialization-class: org.example.movie.core.common.schedule.MovieScheduleResponse
